@@ -2,4 +2,10 @@ collect-data/venv/
 collect-data/steam_data.jsonl
 notebooks/.env
 dataset/reviews-comment-graph-v*/
-notebooks/venv
+dataset/steam_data.jsonl
+dataset/20260426_all_datasets_json.zip
+graphs/
+notebooks/venv/
+
+process-data/venv
+convert-graph/venv

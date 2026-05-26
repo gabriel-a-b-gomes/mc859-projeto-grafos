@@ -8,4 +8,10 @@ graphs/
 notebooks/venv/
 
 process-data/venv
+process-data/results
+process-data/language-models/__pycache__
 convert-graph/venv
+
+process-data/texts/texts.txt
+
+venv

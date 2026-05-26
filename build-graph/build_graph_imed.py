@@ -126,18 +126,21 @@ def pass_one(input_file: str):
             for r in reviews:
                 game = r.get("game", "").strip()
                 dt   = parse_review_date(r.get("date", ""))
+                text = r.get("review", "").strip()
                 if game and dt:
-                    rout.write(f"{game}\t{uid}\t{dt.isoformat()}\n")
+                    rout.write(f"{game}\t{uid}\t{dt.isoformat()}\t{text}\n")
 
             # Comentários → aresta dono-do-perfil → quem comentou
             for c in comments:
               author = c.get("author", "").strip()
               date   = parse_comment_date(c.get("date", ""))
+              text   = c.get("comment", "").strip()
               if author and date:
                   comment_edges_raw.append({
                       "profile_owner": uid,
                       "author":        author,
                       "date":          date.isoformat(),
+                      "text":          text,
                   })
 
             total += 1
@@ -167,12 +170,14 @@ def sort_reviews():
         with open(REVIEWS_TEMP, encoding="utf-8") as f:
             for line in f:
                 parts = line.strip().split("\t")
-                if len(parts) == 3:
+                if len(parts) == 4:
                     entries.append(parts)
         entries.sort(key=lambda x: (x[0], x[2]))
         with open(REVIEWS_SORT, "w", encoding="utf-8") as f:
             for parts in entries:
                 f.write("\t".join(parts) + "\n")
+
+    
     print("  Ordenação concluída.")
 
 
@@ -192,8 +197,8 @@ def build_review_edges():
 
     def flush(game, entries):
         for i in range(len(entries) - 1):
-            u1, d1 = entries[i]
-            u2, d2 = entries[i + 1]
+            u1, d1, t1 = entries[i]
+            u2, d2, t2 = entries[i + 1]
             if u1 == u2:
                 continue
             key = (u1, u2, game)
@@ -206,20 +211,23 @@ def build_review_edges():
                     "game":     game,
                     "src_date": d1,
                     "dst_date": d2,
+                    "text":     t1,
                 })
 
     with open(REVIEWS_SORT, encoding="utf-8") as f:
         for line in f:
             parts = line.strip().split("\t")
-            if len(parts) != 3:
+            if len(parts) != 4:
                 continue
-            game, uid, dt = parts
+            game, uid, dt = parts[0], parts[1], parts[2]
+            text = parts[3] if len(parts) > 3 else ""
+            current_entries.append((uid, dt, text))
             if game != current_game:
                 if current_game and len(current_entries) > 1:
                     flush(current_game, current_entries)
                 current_game = game
                 current_entries = []
-            current_entries.append((uid, dt))
+            current_entries.append((uid, dt, text))
 
     if current_game and len(current_entries) > 1:
         flush(current_game, current_entries)
@@ -251,11 +259,11 @@ def build_comment_edges(comment_edges_raw: list) -> list:
         entries_sorted = sorted(entries, key=lambda x: x["date"])
 
         # Cadeia: owner → entries[0], entries[0] → entries[1], ...
-        chain = [(owner, None)] + [(e["author"], e["date"]) for e in entries_sorted]
+        chain = [(owner, None, "")] + [(e["author"], e["date"], e.get("text", "")) for e in entries_sorted]
 
         for i in range(len(chain) - 1):
-            src, src_date = chain[i]
-            dst, dst_date = chain[i + 1]
+            src, src_date, src_text = chain[i]           # ← NOVO
+            dst, dst_date, dst_text = chain[i + 1]
 
             if src == dst:
                 continue
@@ -270,6 +278,7 @@ def build_comment_edges(comment_edges_raw: list) -> list:
                 "dst":            dst,
                 "type":           "comment",
                 "profile_owner":  owner,
+                "text":          src_text,
             }
             if src_date:
                 edge["src_date"] = src_date
@@ -341,6 +350,7 @@ if __name__ == "__main__":
     print(len(comment_edges_raw))
     
     sort_reviews()
+    
     review_edges   = build_review_edges()
     comment_edges  = build_comment_edges(comment_edges_raw)
     save_outputs(users, comment_edges, review_edges)

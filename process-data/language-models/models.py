@@ -64,36 +64,36 @@ def score_facebook(text):
     return round((1 - score_hate) * 10, 2)
 
 
-with open(INPUT_FILE, "r", encoding="utf-8") as f:
-    steam_texts = [line.strip() for line in f if line.strip()]
+# with open(INPUT_FILE, "r", encoding="utf-8") as f:
+#     steam_texts = [line.strip() for line in f if line.strip()]
 
-print(f"Total de textos carregados: {len(steam_texts)}")
+# print(f"Total de textos carregados: {len(steam_texts)}")
 
-data = []
+# data = []
 
-for text in tqdm(steam_texts, desc="Progresso dos Modelos"):
-    data.append({
-        "Texto Original": text,
-        "Texto (Resumo)": text if len(text) <= 40 else text[:37] + "...",
-        "M1-Cardiff (Sentimento)": score_cardiff(text),
-        "M2-Unitary (Toxicidade)": score_unitary(text),
-        "M3-CNERG (Ódio)": score_cnerg(text),
-        "M4-Facebook (Moderação)": score_facebook(text)
-    })
+# for text in tqdm(steam_texts, desc="Progresso dos Modelos"):
+#     data.append({
+#         "Texto Original": text,
+#         "Texto (Resumo)": text if len(text) <= 40 else text[:37] + "...",
+#         "M1-Cardiff (Sentimento)": score_cardiff(text),
+#         "M2-Unitary (Toxicidade)": score_unitary(text),
+#         "M3-CNERG (Ódio)": score_cnerg(text),
+#         "M4-Facebook (Moderação)": score_facebook(text)
+#     })
 
-df = pd.DataFrame(data)
+# df = pd.DataFrame(data)
 
-df.to_csv("result_benchmark_models.csv", index=False, encoding="utf-8")
+# df.to_csv("result_benchmark_models.csv", index=False, encoding="utf-8")
 
-df_html = df.drop(columns=["Texto (Resumo)"])
-df_html.to_html("result_benchmark_models.html", index=False, encoding="utf-8", classes="table table-striped")
+# df_html = df.drop(columns=["Texto (Resumo)"])
+# df_html.to_html("result_benchmark_models.html", index=False, encoding="utf-8", classes="table table-striped")
 
-print("\n" + "="*70 + "\n          TABELA COMPARATIVA DE MODELOS (ESCALA 0 A 10)\n" + "="*70)
+# print("\n" + "="*70 + "\n          TABELA COMPARATIVA DE MODELOS (ESCALA 0 A 10)\n" + "="*70)
 
-df_terminal = df.drop(columns=["Texto Original"])
+# df_terminal = df.drop(columns=["Texto Original"])
 
-print(tabulate(df_terminal, headers='keys', tablefmt='grid', showindex=False))
+# print(tabulate(df_terminal, headers='keys', tablefmt='grid', showindex=False))
 
-print("\n[INFO] Os resultados completos foram salvos com sucesso em:")
-print(" -> CSV: 'resultado_benchmark_modelos.csv'")
-print(" -> HTML: 'resultado_benchmark_modelos.html' (Recomendado para ler os textos longos!)")
+# print("\n[INFO] Os resultados completos foram salvos com sucesso em:")
+# print(" -> CSV: 'resultado_benchmark_modelos.csv'")
+# print(" -> HTML: 'resultado_benchmark_modelos.html' (Recomendado para ler os textos longos!)")

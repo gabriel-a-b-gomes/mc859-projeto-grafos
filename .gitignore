@@ -15,3 +15,6 @@ convert-graph/venv
 process-data/texts/texts.txt
 
 venv
+dataset/texts_enriched_merged.json
+dataset/final-graph-*/
+dataset/texts-processed/*

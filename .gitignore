@@ -12,6 +12,8 @@ process-data/results
 process-data/language-models/__pycache__
 convert-graph/venv
 
+data-analysys/data
+
 process-data/texts/texts.txt
 
 venv

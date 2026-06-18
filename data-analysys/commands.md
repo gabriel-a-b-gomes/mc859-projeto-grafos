@@ -10,3 +10,8 @@ python contagion.py --nodes nodes.json --edges edges.json --model betweenness --
 
 ## Executar, salvar gráficos e exportar JSON
 python contagion.py --nodes nodes.json --edges edges.json --model all --save_plots --save_json
+
+
+# Comandos para executar permutation_test.py
+
+python permutation_test.py --nodes nodes.json --edges edges.json --n_perm 100 --mode weight --save_plot perm_weight.png --save_json perm_weight.json

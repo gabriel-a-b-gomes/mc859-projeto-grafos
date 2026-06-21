@@ -2,35 +2,13 @@ import json
 import copy
 import random
 import argparse
+from pathlib import Path
 from collections import defaultdict
 
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import networkx as nx
-
-def compute_edge_weight(s_src: float, s_dst: float, invert: bool = True) -> float:
-    q_src = (1.0 - s_src / 10.0) if invert else (s_src / 10.0)
-    q_dst = (1.0 - s_dst / 10.0) if invert else (s_dst / 10.0)
-    q_src = max(0.0, min(1.0, q_src))
-    q_dst = max(0.0, min(1.0, q_dst))
-    v_src = 2.0 * q_src - 1.0
-    v_dst = 2.0 * q_dst - 1.0
-    return round(v_dst * ((1.0 + v_src * v_dst) / 2.0), 4)
-
-
-def is_toxic(score: float, threshold: float = 5.0) -> bool:
-    return score < threshold
-
-
-def node_toxicity_index(G: nx.DiGraph, node: str) -> float:
-    out_edges = list(G.out_edges(node, data=True))
-    if not out_edges:
-        in_edges = list(G.in_edges(node, data=True))
-        if not in_edges:
-            return 0.0
-        return float(np.mean([d.get("weight", 0.0) for _, _, d in in_edges]))
-    return float(np.mean([d.get("weight", 0.0) for _, _, d in out_edges]))
 
 class WeightRange:
     def __init__(self, w_min: float, w_max: float, tox_cutoff: float = None):
@@ -43,12 +21,18 @@ class WeightRange:
     def toxic_signal(self, w: float) -> float:
         if w >= self.cutoff:
             return 0.0
-        return (self.cutoff - w) / (self.cutoff - self.w_min)
+        denom = self.cutoff - self.w_min
+        if denom <= 0:
+            return 0.0
+        return min(1.0, (self.cutoff - w) / denom)
 
     def healthy_signal(self, w: float) -> float:
         if w <= self.cutoff:
             return 0.0
-        return (w - self.cutoff) / (self.w_max - self.cutoff)
+        denom = self.w_max - self.cutoff
+        if denom <= 0:
+            return 0.0
+        return min(1.0, (w - self.cutoff) / denom)
 
     def is_toxic(self, w: float) -> bool:
         return w < self.cutoff
@@ -61,11 +45,97 @@ class WeightRange:
             return 0.0
         return float(np.mean([self.toxic_signal(w) for w in weights]))
 
+    def signed_toxicity_index(self, weights: list) -> float:
+        if not weights:
+            return 0.0
+        return float(np.mean([
+            self.healthy_signal(w) - self.toxic_signal(w) for w in weights
+        ]))
+
     def __repr__(self):
         return (f"WeightRange(w_min={self.w_min}, w_max={self.w_max}, "
                 f"cutoff={self.cutoff})")
 
-def load_graph(nodes_path: str, edges_path: str, tox_treshold:float) -> nx.DiGraph:
+
+def make_weight_range(w_min: float, w_max: float, tox_cutoff: float = None) -> WeightRange:
+    wr = WeightRange(w_min, w_max, tox_cutoff)
+    print(f"\n  Intervalo de weight  : [{wr.w_min}, {wr.w_max}]")
+    print(f"  Limiar de toxicidade : {wr.cutoff}  "
+          f"(w < {wr.cutoff} = tóxico  |  w >= {wr.cutoff} = saudável)")
+    return wr
+
+
+def seed_toxic_nodes(
+    G: nx.DiGraph,
+    wr: WeightRange,
+    n_seeds: int,
+    use_kcore: bool = True,
+    verbose: bool = False,
+) -> list:
+    
+    G_check = G
+    if nx.number_of_selfloops(G) > 0:
+        G_check = G.copy()
+        G_check.remove_edges_from(nx.selfloop_edges(G_check))
+
+    tox = {}
+    for n in G.nodes():
+        out_w = [d.get("weight", wr.cutoff) for _, _, d in G.out_edges(n, data=True)]
+        if out_w:
+            tox[n] = wr.toxicity_index(out_w)
+        else:
+            in_w = [d.get("weight", wr.cutoff) for _, _, d in G.in_edges(n, data=True)]
+            tox[n] = wr.toxicity_index(in_w)
+
+    if not use_kcore:
+        ranked = sorted(G.nodes(), key=lambda n: tox[n], reverse=True)
+        return ranked[:n_seeds]
+
+    cores = nx.core_number(G_check.to_undirected())
+
+    n_distinct_cores = len(set(cores.values()))
+    max_core = max(cores.values()) if cores else 0
+
+    degenerate = n_distinct_cores <= 1 or max_core <= 1
+
+    if degenerate:
+        if verbose:
+            print(f"  [Seeds] K-core degenerado (max_core={max_core}, "
+                  f"{n_distinct_cores} camada(s) distintas) — "
+                  f"grafo provavelmente esparso/tipo-árvore.")
+            print(f"  [Seeds] Usando apenas toxicidade como critério (fallback).")
+        ranked = sorted(G.nodes(), key=lambda n: tox[n], reverse=True)
+    else:
+        ranked = sorted(
+            G.nodes(),
+            key=lambda n: (cores[n], tox[n]),
+            reverse=True,
+        )
+        if verbose:
+            print(f"  [Seeds] K-core ativo (max_core={max_core}, "
+                  f"{n_distinct_cores} camadas distintas)")
+
+    selected = ranked[:n_seeds]
+
+    if verbose:
+        print(f"  [Seeds] {n_seeds} sementes selecionadas:")
+        for i, s in enumerate(selected, 1):
+            core_str = f"core={cores.get(s, '-')}" if not degenerate else "core=n/a"
+            print(f"    {i}. …{s[-8:]}  {core_str}  tox={tox[s]:.4f}")
+
+    return selected
+
+
+def node_toxicity_index(G: nx.DiGraph, node: str, wr: WeightRange) -> float:
+    out_edges = list(G.out_edges(node, data=True))
+    weights = [d.get("weight", wr.cutoff) for _, _, d in out_edges]
+    if not weights:
+        in_edges = list(G.in_edges(node, data=True))
+        weights = [d.get("weight", wr.cutoff) for _, _, d in in_edges]
+    return wr.signed_toxicity_index(weights)
+
+
+def load_graph(nodes_path: str, edges_path: str) -> nx.DiGraph:
     with open(nodes_path, encoding="utf-8") as f:
         nodes_data = json.load(f)
     with open(edges_path, encoding="utf-8") as f:
@@ -99,87 +169,81 @@ def load_graph(nodes_path: str, edges_path: str, tox_treshold:float) -> nx.DiGra
             G.nodes[n]["review_count"] = 0
             G.nodes[n]["comment_count"] = 0
 
-    return _print_graph_stats(G, tox_treshold)
+    return _print_graph_stats(G)
 
 
-def load_graphml(graphml_path: str, wr:WeightRange) -> nx.DiGraph:
+def load_graphml(graphml_path: str) -> nx.DiGraph:
     G = nx.read_graphml(graphml_path)
 
     if not G.is_directed():
         G = G.to_directed()
 
     for n in G.nodes():
-        G.nodes[n].setdefault("review_count",  0)
+        G.nodes[n].setdefault("review_count", 0)
         G.nodes[n].setdefault("comment_count", 0)
 
     for u, v, data in G.edges(data=True):
         if "weight" not in data:
             G[u][v]["weight"] = 0.0
+        else:
+            G[u][v]["weight"] = float(data["weight"])
 
-    return _print_graph_stats(G, wr)
+    return _print_graph_stats(G)
 
 
-def _print_graph_stats(G: nx.DiGraph, wr:WeightRange) -> nx.DiGraph:
+def _print_graph_stats(G: nx.DiGraph) -> nx.DiGraph:
     all_weights = [d["weight"] for _, _, d in G.edges(data=True)]
-
-    if not all_weights:
-        print("  Aviso: grafo sem arestas.")
-        return G
-
-    n_toxic   = sum(1 for w in all_weights if w < wr.cutoff)
-    n_healthy = sum(1 for w in all_weights if w > wr.cutoff)
 
     print(f"\n{'━'*52}")
     print(f"  GRAFO CARREGADO")
     print(f"{'━'*52}")
-    print(f"  Nós              : {G.number_of_nodes():,}")
-    print(f"  Arestas          : {G.number_of_edges():,}")
-    print(f"  Tóxicas  (w < {wr.cutoff}) : {n_toxic:,} ({100*n_toxic/len(all_weights):.1f}%)")
-    print(f"  Saudáveis(w > {wr.cutoff}) : {n_healthy:,} ({100*n_healthy/len(all_weights):.1f}%)")
-    print(f"  Weight médio     : {np.mean(all_weights):.4f}")
-    print(f"  Weight mín/máx   : {min(all_weights):.4f} / {max(all_weights):.4f}")
+    print(f"  Nós     : {G.number_of_nodes():,}")
+    print(f"  Arestas : {G.number_of_edges():,}")
+
+    if not all_weights:
+        print("  Aviso: grafo sem arestas com weight.")
+        return G
+
+    print(f"  Weight observado: mín={min(all_weights):.4f}  "
+          f"máx={max(all_weights):.4f}  média={np.mean(all_weights):.4f}")
+    print(f"  (Use --w_min/--w_max para definir o intervalo teórico de análise,")
+    print(f"   que pode ser diferente do mín/máx observados nesta amostra)")
 
     return G
 
 
-def make_weight_range(w_min: float, w_max: float, tox_cutoff: float = None) -> WeightRange:
-    wr = WeightRange(w_min, w_max, tox_cutoff)
-    print(f"\n  Intervalo de weight : [{wr.w_min}, {wr.w_max}]")
-    print(f"  Limiar de toxicidade: {wr.cutoff}  "
-          f"(w < {wr.cutoff} = tóxico  |  w >= {wr.cutoff} = saudável)")
-    return wr
-
-
-def seed_toxic_nodes(G: nx.DiGraph, wr: WeightRange, n_seeds: int) -> list:
-    tox = {}
-    for n in G.nodes():
-        out_w = [d.get("weight", wr.cutoff) for _, _, d in G.out_edges(n, data=True)]
-        if not out_w:
-            in_w = [d.get("weight", wr.cutoff) for _, _, d in G.in_edges(n, data=True)]
-            tox[n] = wr.toxicity_index(in_w)
-        else:
-            tox[n] = wr.toxicity_index(out_w)
-
-    return sorted(tox, key=tox.get, reverse=True)[:n_seeds]
+def report_toxicity_split(G: nx.DiGraph, wr: WeightRange):
+    all_weights = [d["weight"] for _, _, d in G.edges(data=True)]
+    if not all_weights:
+        return
+    n_toxic   = sum(1 for w in all_weights if wr.is_toxic(w))
+    n_healthy = len(all_weights) - n_toxic
+    print(f"\n  Classificação (cutoff={wr.cutoff}):")
+    print(f"    Tóxicas   (w < {wr.cutoff}) : {n_toxic:,} "
+          f"({100*n_toxic/len(all_weights):.1f}%)")
+    print(f"    Saudáveis (w >= {wr.cutoff}): {n_healthy:,} "
+          f"({100*n_healthy/len(all_weights):.1f}%)")
 
 
 def run_sis_sir(
     G: nx.DiGraph,
+    wr: WeightRange,
     mode: str = "sis",
     beta: float = 0.35,
     gamma: float = 0.15,
-    tox_threshold: float = 5.0,
     n_seeds: int = 3,
     steps: int = 30,
     seed: int = 42,
-    wr: WeightRange = None
+    seed_strategy: str = "kcore",
+    verbose_seeds: bool = False,
 ) -> dict:
-    
     random.seed(seed)
     nodes = list(G.nodes())
     states = {n: "S" for n in nodes}
 
-    for n in seed_toxic_nodes(G, wr, n_seeds):
+    for n in seed_toxic_nodes(G, wr, n_seeds,
+                              use_kcore=(seed_strategy == "kcore"),
+                              verbose=verbose_seeds):
         states[n] = "I"
 
     history = {"S": [], "I": [], "R": []}
@@ -204,19 +268,17 @@ def run_sis_sir(
                 for pred in G.predecessors(node):
                     if states[pred] == "I":
                         w = G[pred][node].get("weight", wr.cutoff)
-                        if (w < wr.cutoff):
-                            p_infect += beta * wr.toxic_signal(w)
+                        p_infect += beta * wr.toxic_signal(w)
                 p_infect = min(p_infect, 0.999)
-
                 if random.random() < p_infect:
                     new_states[node] = "I"
 
             elif states[node] == "I":
-                in_positive = sum(
+                in_healthy = [
                     wr.healthy_signal(G[u][node].get("weight", wr.cutoff))
                     for u in G.predecessors(node)
-                )
-                recovery_boost = min(0.3, in_positive * 0.1)
+                ]
+                recovery_boost = min(0.3, np.mean(in_healthy) * 0.3) if in_healthy else 0.0
                 if random.random() < (gamma + recovery_boost):
                     new_states[node] = "R" if mode == "sir" else "S"
 
@@ -246,6 +308,7 @@ def run_sis_sir(
         "final_states": states, "history": history, "steps": steps,
     }
 
+
 def compute_threshold(node_attrs: dict, base_theta: float, sigma: float) -> float:
     activity = (node_attrs.get("review_count", 0) + node_attrs.get("comment_count", 0)) / 50.0
     theta = random.gauss(base_theta, sigma) + activity * 0.15
@@ -254,15 +317,15 @@ def compute_threshold(node_attrs: dict, base_theta: float, sigma: float) -> floa
 
 def run_granovetter(
     G: nx.DiGraph,
+    wr: WeightRange,
     base_theta: float = 0.30,
     sigma: float = 0.12,
     n_seeds: int = 2,
-    tox_threshold: float = 5.0,
     max_rounds: int = 50,
     seed: int = 42,
-    wr: WeightRange = None
+    seed_strategy: str = "kcore",
+    verbose_seeds: bool = False,
 ) -> dict:
-
     random.seed(seed)
     nodes = list(G.nodes())
 
@@ -272,7 +335,9 @@ def run_granovetter(
     }
 
     adopted = {n: False for n in nodes}
-    for n in seed_toxic_nodes(G, wr, n_seeds):
+    for n in seed_toxic_nodes(G, wr, n_seeds,
+                              use_kcore=(seed_strategy == "kcore"),
+                              verbose=verbose_seeds):
         adopted[n] = True
 
     rounds_data = []
@@ -292,20 +357,11 @@ def run_granovetter(
             if not predecessors:
                 continue
 
-            toxic_pressure = sum(
+            toxic_signals = [
                 wr.toxic_signal(G[u][node].get("weight", wr.cutoff))
                 for u in predecessors if adopted[u]
-            )
-
-            total_exposure = sum(
-                abs(G[u][node].get("weight", wr.cutoff) - wr.cutoff)
-                for u in predecessors
-            )
-
-            if total_exposure == 0:
-                continue
-
-            pressure_ratio = toxic_pressure / total_exposure
+            ]
+            pressure_ratio = sum(toxic_signals) / len(predecessors)
 
             if pressure_ratio >= thresholds[node]:
                 new_adopted[node] = True
@@ -337,13 +393,13 @@ def run_granovetter(
         "final_adopted": adopted,
     }
 
+
 def run_betweenness(
     G: nx.DiGraph,
+    wr: WeightRange,
     top_k: int = 10,
     k_approx: int = None,
-    wr: WeightRange = None
 ) -> dict:
-   
     n = G.number_of_nodes()
     if k_approx is None and n > 2000:
         k_approx = min(500, n)
@@ -365,9 +421,9 @@ def run_betweenness(
     node_details = []
     for node, bc in scores.items():
         attrs = G.nodes[node]
-        tox_idx = node_toxicity_index(G, node)
+        tox_idx = node_toxicity_index(G, node, wr)
         out_weights = [d["weight"] for _, _, d in G.out_edges(node, data=True)]
-        toxic_edges_out = sum(1 for w in out_weights if w < 0)
+        toxic_edges_out = sum(1 for w in out_weights if wr.is_toxic(w))
 
         node_details.append({
             "id": node,
@@ -392,6 +448,8 @@ def run_betweenness(
               f"{nd['in_degree']:>5} {nd['out_degree']:>5}{flag}")
 
     print(f"\n  ⚠  = nó com alta centralidade E índice tóxico negativo (vetor crítico)")
+    print(f"  (toxicity_index ∈ [-1, 1] — negativo=tóxico, positivo=saudável, "
+          f"independente do range original do weight)")
 
     return {
         "scores": scores,
@@ -399,6 +457,7 @@ def run_betweenness(
         "top_k": top_k,
         "all_details": node_details,
     }
+
 
 COLORS = {
     "S": "#378ADD", "I": "#E24B4A", "R": "#1D9E75",
@@ -491,23 +550,26 @@ def plot_granovetter(result: dict, save_path: str = None):
     _save_or_show(fig, save_path)
 
 
-def plot_betweenness(G: nx.DiGraph, result: dict, save_path: str = None, wr:WeightRange = None):
-    top = result["top_nodes"]
-    all_det = result["all_details"]
-    max_bc = max(nd["betweenness"] for nd in all_det) if all_det else 1
+def plot_betweenness(G: nx.DiGraph, result: dict, save_path: str = None):
+    top      = result["top_nodes"]
+    all_det  = result["all_details"]
+    max_bc   = max(nd["betweenness"] for nd in all_det) if all_det else 1
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     fig.suptitle("Centralidade de Intermediação — Pontes de Contágio Tóxico",
                  fontsize=13, fontweight="bold")
 
+    def node_color(tox_idx):
+        if tox_idx < -0.1: return COLORS["toxic"]
+        if tox_idx <  0.1: return COLORS["mid_bc"]
+        return COLORS["healthy"]
+
     ax = axes[0]
     ids_short = [f"…{nd['id'][-8:]}" for nd in top]
-    vals = [nd["betweenness"] for nd in top]
-    tox_idxs = [nd["toxicity_index"] for nd in top]
-    clrs = [COLORS["toxic"] if t < -0.1 else
-            COLORS["mid_bc"] if t < 0.1 else
-            COLORS["healthy"] for t in tox_idxs]
-    bars = ax.barh(ids_short[::-1], vals[::-1], color=clrs[::-1], alpha=0.85, edgecolor="white")
+    vals  = [nd["betweenness"]    for nd in top]
+    tidxs = [nd["toxicity_index"] for nd in top]
+    clrs  = [node_color(t) for t in tidxs]
+    bars  = ax.barh(ids_short[::-1], vals[::-1], color=clrs[::-1], alpha=0.85, edgecolor="white")
     for bar, v in zip(bars, vals[::-1]):
         ax.text(v + max_bc * 0.01, bar.get_y() + bar.get_height()/2,
                 f"{v:.4f}", va="center", fontsize=8)
@@ -515,9 +577,9 @@ def plot_betweenness(G: nx.DiGraph, result: dict, save_path: str = None, wr:Weig
     ax.set_title(f"Top {len(top)} usuários ponte")
     ax.grid(axis="x", alpha=0.15)
     patches = [
-        mpatches.Patch(color=COLORS["toxic"],   label=f"Índice tóxico (< {wr.cutoff})"),
+        mpatches.Patch(color=COLORS["toxic"],   label="Índice tóxico (< -0.1)"),
         mpatches.Patch(color=COLORS["mid_bc"],  label="Neutro"),
-        mpatches.Patch(color=COLORS["healthy"], label=f"Saudável (> {wr.cutoff})"),
+        mpatches.Patch(color=COLORS["healthy"], label="Saudável (> 0.1)"),
     ]
     ax.legend(handles=patches, fontsize=8, loc="lower right")
 
@@ -525,23 +587,20 @@ def plot_betweenness(G: nx.DiGraph, result: dict, save_path: str = None, wr:Weig
     all_bc  = [d["betweenness"]    for d in all_det]
     all_tox = [d["toxicity_index"] for d in all_det]
     all_deg = [d["in_degree"] + d["out_degree"] for d in all_det]
-    sc_clrs = [COLORS["toxic"]   if t < -0.1 else
-               COLORS["mid_bc"] if t < 0.1  else
-               COLORS["healthy"] for t in all_tox]
-    sizes = [max(20, min(200, d * 10)) for d in all_deg]
+    sc_clrs = [node_color(t) for t in all_tox]
+    sizes   = [max(20, min(200, d * 10)) for d in all_deg]
     ax2.scatter(all_tox, all_bc, c=sc_clrs, s=sizes, alpha=0.7, edgecolors="white", lw=0.3)
-    ax2.axvline(0, color="gray", ls="--", lw=0.8, alpha=0.5)
-    ax2.axvline(-0.1, color=COLORS["toxic"], ls=":", lw=0.8, alpha=0.5)
-    ax2.set_xlabel("Índice de toxicidade do nó (média dos weights de saída)")
+    ax2.axvline(0,    color="gray",          ls="--", lw=0.8, alpha=0.5)
+    ax2.axvline(-0.1, color=COLORS["toxic"], ls=":",  lw=0.8, alpha=0.5)
+    ax2.set_xlabel("Índice de toxicidade do nó [-1, 1]")
     ax2.set_ylabel("Betweenness Centrality")
     ax2.set_title("Betweenness × Toxicidade\n(tamanho = grau total)")
     ax2.grid(alpha=0.1)
     ax2.legend(handles=patches, fontsize=8)
 
     ymax = max(all_bc) if all_bc else 1
-    ax2.fill_betweenx([0, ymax], -1, -0.1, alpha=0.05, color=COLORS["toxic"],
-                      label="Zona de risco")
-    ax2.text(-0.9, ymax * 0.95, "zona de risco\n(bridge tóxico)", fontsize=7,
+    ax2.fill_betweenx([0, ymax], -1, -0.1, alpha=0.05, color=COLORS["toxic"])
+    ax2.text(-0.95, ymax * 0.95, "zona de risco\n(bridge tóxico)", fontsize=7,
              color=COLORS["toxic"], alpha=0.7)
 
     plt.tight_layout()
@@ -567,23 +626,34 @@ def main():
                              help="Arquivo .graphml de comunidade")
     input_group.add_argument("--nodes",   type=str, default=None,
                              help="nodes.json do grafo completo")
-    
-    parser.add_argument("--wmin",  type=str, default=0.0)
-    parser.add_argument("--wmax",  type=str, default=1.0)
-    
-    parser.add_argument("--edges",  type=str, default="edges.json",
+
+    parser.add_argument("--edges", type=str, default="edges.json",
                         help="edges.json (usado com --nodes)")
-    parser.add_argument("--model",  default="all",
+    parser.add_argument("--model", default="all",
                         choices=["all", "sis", "sir", "granovetter", "betweenness"])
 
-    parser.add_argument("--beta",          type=float, default=0.35)
-    parser.add_argument("--gamma",         type=float, default=0.15)
-    parser.add_argument("--steps",         type=int,   default=100)
-    parser.add_argument("--seeds",         type=int,   default=500)
-    parser.add_argument("--tox_threshold", type=float, default=0.6)
+    parser.add_argument("--w_min", type=float, default=0.0,
+                        help="Limite inferior do weight (padrão: -1.0, grafo completo)")
+    parser.add_argument("--w_max", type=float, default=1.0,
+                        help="Limite superior do weight (padrão: 1.0, grafo completo)")
+    parser.add_argument("--tox_cutoff", type=float, default=0.6,
+                        help="Limiar de toxicidade (padrão: ponto médio de w_min/w_max). "
+                             "w < cutoff é considerado tóxico.")
 
-    parser.add_argument("--theta",  type=float, default=0.30)
-    parser.add_argument("--sigma",  type=float, default=0.12)
+    parser.add_argument("--beta",  type=float, default=0.35)
+    parser.add_argument("--gamma", type=float, default=0.15)
+    parser.add_argument("--steps", type=int,   default=30)
+    parser.add_argument("--seeds", type=int,   default=3)
+    parser.add_argument("--seed_strategy", default="kcore",
+                        choices=["kcore", "toxicity"],
+                        help="kcore: prioriza núcleo estrutural + toxicidade "
+                             "(com fallback automático se o grafo for esparso). "
+                             "toxicity: só toxicidade (comportamento antigo).")
+    parser.add_argument("--verbose_seeds", action="store_true",
+                        help="Mostra detalhes das sementes escolhidas e diagnóstico do k-core")
+
+    parser.add_argument("--theta", type=float, default=0.30)
+    parser.add_argument("--sigma", type=float, default=0.12)
 
     parser.add_argument("--top_k",    type=int, default=10)
     parser.add_argument("--k_approx", type=int, default=None,
@@ -595,39 +665,46 @@ def main():
     args = parser.parse_args()
     run_all = args.model == "all"
 
-    wrange = make_weight_range(args.wmin, args.wmax, tox_cutoff=args.tox_threshold)
-
     if args.graphml:
-        G = load_graphml(args.graphml, wrange) 
+        G = load_graphml(args.graphml)
+        out_prefix = Path(args.graphml).stem
     else:
-        G = load_graph(args.nodes, args.edges, wrange)
+        G = load_graph(args.nodes, args.edges)
+        out_prefix = "plot"
+
+    wr = make_weight_range(args.w_min, args.w_max, args.tox_cutoff)
+    report_toxicity_split(G, wr)
 
     results = {}
 
     if run_all or args.model == "sis":
-        res = run_sis_sir(G, mode="sis", beta=args.beta, gamma=args.gamma,
-                          tox_threshold=args.tox_threshold, n_seeds=args.seeds,
-                          steps=args.steps, wr=wrange)
+        res = run_sis_sir(G, wr, mode="sis", beta=args.beta, gamma=args.gamma,
+                          n_seeds=args.seeds, steps=args.steps,
+                          seed_strategy=args.seed_strategy,
+                          verbose_seeds=args.verbose_seeds)
         results["sis"] = res
-        plot_sis_sir(res, "plot_sis.png" if args.save_plots else None)
+        plot_sis_sir(res, f"{out_prefix}_sis.png" if args.save_plots else None)
 
     if run_all or args.model == "sir":
-        res = run_sis_sir(G, mode="sir", beta=args.beta, gamma=args.gamma,
-                          tox_threshold=args.tox_threshold, n_seeds=args.seeds,
-                          steps=args.steps, wr=wrange)
+        res = run_sis_sir(G, wr, mode="sir", beta=args.beta, gamma=args.gamma,
+                          n_seeds=args.seeds, steps=args.steps,
+                          seed_strategy=args.seed_strategy,
+                          verbose_seeds=args.verbose_seeds)
         results["sir"] = res
-        plot_sis_sir(res, "plot_sir.png" if args.save_plots else None)
+        plot_sis_sir(res, f"{out_prefix}_sir.png" if args.save_plots else None)
 
     if run_all or args.model == "granovetter":
-        res = run_granovetter(G, base_theta=args.theta, sigma=args.sigma,
-                              n_seeds=args.seeds, tox_threshold=args.tox_threshold, wr=wrange)
+        res = run_granovetter(G, wr, base_theta=args.theta, sigma=args.sigma,
+                              n_seeds=args.seeds,
+                              seed_strategy=args.seed_strategy,
+                              verbose_seeds=args.verbose_seeds)
         results["granovetter"] = res
-        plot_granovetter(res, "plot_granovetter.png" if args.save_plots else None)
+        plot_granovetter(res, f"{out_prefix}_granovetter.png" if args.save_plots else None)
 
     if run_all or args.model == "betweenness":
-        res = run_betweenness(G, top_k=args.top_k, k_approx=args.k_approx, wr=wrange)
+        res = run_betweenness(G, wr, top_k=args.top_k, k_approx=args.k_approx)
         results["betweenness"] = res
-        plot_betweenness(G, res, "plot_betweenness.png" if args.save_plots else None, wrange)
+        plot_betweenness(G, res, f"{out_prefix}_betweenness.png" if args.save_plots else None)
 
     if args.save_json:
         export = {}
@@ -643,11 +720,13 @@ def main():
             elif key == "betweenness":
                 export[key] = {"top_nodes": val["top_nodes"]}
 
-        with open("results.json", "w", encoding="utf-8") as f:
+        json_path = f"{out_prefix}_results.json"
+        with open(json_path, "w", encoding="utf-8") as f:
             json.dump(export, f, indent=2, ensure_ascii=False)
-        print("\n  Exportado: results.json")
+        print(f"\n  Exportado: {json_path}")
 
     print("\nConcluído.\n")
+
 
 if __name__ == "__main__":
     main()

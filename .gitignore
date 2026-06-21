@@ -1,15 +1,19 @@
-collect-data/venv/
-collect-data/steam_data.jsonl
-notebooks/.env
+*/collect-data/venv/
+*/collect-data/steam_data.jsonl
+*/notebooks/.env
+*/notebooks/venv/
+*/notebooks/lib/
+
+dataset/*/
 dataset/reviews-comment-graph-v*/
 dataset/steam_data.jsonl
 dataset/20260426_all_datasets_json.zip
-graphs/
-notebooks/venv/
 
-process-data/venv
-process-data/results
-process-data/language-models/__pycache__
+graphs/
+
+*/process-data/venv
+*/process-data/results
+*/process-data/language-models/__pycache__
 convert-graph/venv
 
 data-analysys/data
@@ -20,3 +24,5 @@ venv
 dataset/texts_enriched_merged.json
 dataset/final-graph-*/
 dataset/texts-processed/*
+dataset/final-graphs.zip
+dataset/graphs_and_texts_enriched_compiled.zip

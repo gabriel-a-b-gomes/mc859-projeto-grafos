@@ -1,19 +1,3 @@
-"""
-Centralidade de Intermediação — versão otimizada para grafos grandes
-=====================================================================
-Implementa Brandes amostral manualmente com:
-  - Barra de progresso (tqdm) atualizada a cada fonte processada
-  - Checkpoint automático em disco (retoma de onde parou)
-  - Resultado parcial válido a qualquer momento (Ctrl+C salva e sai)
-  - Estimativa de tempo restante em tempo real
-
-Uso:
-    python betweenness.py --nodes nodes.json --edges edges.json
-    python betweenness.py --nodes nodes.json --edges edges.json --k 200
-    python betweenness.py --nodes nodes.json --edges edges.json --k 500 --checkpoint ckpt.json
-    python betweenness.py --nodes nodes.json --edges edges.json --resume ckpt.json
-"""
-
 import json
 import time
 import random
@@ -33,11 +17,11 @@ class LightGraph:
     Muito mais rápida que nx.DiGraph para BFS repetido em grafos grandes.
     """
     def __init__(self):
-        self.nodes      = []           # lista ordenada de IDs
+        self.nodes      = []     
         self.node_set   = set()
-        self.successors = defaultdict(list)   # u → [v, ...]
-        self.predecessors = defaultdict(list) # v → [u, ...]
-        self.edge_data  = {}           # (u,v) → dict de atributos
+        self.successors = defaultdict(list)  
+        self.predecessors = defaultdict(list) 
+        self.edge_data  = {}           
 
     def add_node(self, nid, **attrs):
         if nid not in self.node_set:
@@ -76,7 +60,7 @@ def load_light_graph(nodes_path: str, edges_path: str) -> LightGraph:
                    comment_count=nd.get("comment_count", 0))
     for ed in edges_data:
         w = float(ed.get("weight", 0.0))
-        # Custo de contágio: arestas tóxicas (w<0) têm custo baixo
+        
         toxic_cost = round(1.0 - max(0.0, -w), 6)
         G.add_edge(ed["src"], ed["dst"],
                    weight=w,
@@ -92,9 +76,6 @@ def load_light_graph(nodes_path: str, edges_path: str) -> LightGraph:
     return G
 
 
-# ══════════════════════════════════════════════════════════════
-# BRANDES BFS — UMA FONTE POR VEZ (unweighted, mais rápido)
-# ══════════════════════════════════════════════════════════════
 
 def _brandes_single_source(G: LightGraph, source: str, scores: dict):
     """
@@ -103,10 +84,10 @@ def _brandes_single_source(G: LightGraph, source: str, scores: dict):
     a topologia importa mais que os pesos para intermediação.
     """
     stack   = []
-    pred    = defaultdict(list)   # predecessores no DAG de caminhos mínimos
-    sigma   = defaultdict(int)    # nº de caminhos mínimos até cada nó
+    pred    = defaultdict(list)  
+    sigma   = defaultdict(int)    
     dist    = defaultdict(lambda: -1)
-    delta   = defaultdict(float)  # dependência acumulada
+    delta   = defaultdict(float)  
 
     sigma[source] = 1
     dist[source]  = 0
@@ -117,10 +98,10 @@ def _brandes_single_source(G: LightGraph, source: str, scores: dict):
         v = queue.popleft()
         stack.append(v)
         for w in G.successors[v]:
-            if dist[w] < 0:                       # primeira visita
+            if dist[w] < 0:                      
                 queue.append(w)
                 dist[w] = dist[v] + 1
-            if dist[w] == dist[v] + 1:            # caminho mínimo via v
+            if dist[w] == dist[v] + 1:          
                 sigma[w] += sigma[v]
                 pred[w].append(v)
 
@@ -134,9 +115,6 @@ def _brandes_single_source(G: LightGraph, source: str, scores: dict):
             scores[w] += delta[w]
 
 
-# ══════════════════════════════════════════════════════════════
-# BETWEENNESS AMOSTRAL COM PROGRESSO + CHECKPOINT
-# ══════════════════════════════════════════════════════════════
 
 def run_betweenness_sampled(
     G: LightGraph,
@@ -146,23 +124,7 @@ def run_betweenness_sampled(
     resume_path: str = None,
     seed: int = 42,
 ) -> dict:
-    """
-    Betweenness amostral de Brandes com progresso em tempo real.
 
-    Estratégia:
-        - Amostra k nós fonte aleatoriamente (sem reposição)
-        - Executa BFS de Brandes a partir de cada fonte
-        - Normaliza ao final pelo número de pares possíveis
-        - A cada fonte, atualiza a barra de progresso com:
-            * % concluído
-            * tempo decorrido e estimativa de tempo restante
-            * top-3 bridges encontrados até agora
-
-    Checkpoint:
-        - Salva progresso a cada 10 fontes processadas
-        - Se interrompido (Ctrl+C), salva automaticamente antes de sair
-        - Com --resume, retoma de onde parou
-    """
     random.seed(seed)
     n = G.number_of_nodes()
     all_nodes = G.nodes
@@ -249,9 +211,7 @@ def run_betweenness_sampled(
     if not interrupted:
         save_checkpoint(len(sources))
 
-    # ── Normalização ─────────────────────────────────────────
-    # Fator de normalização para grafo dirigido: (n-1)*(n-2)
-    # Ajustado pela fração amostrada: multiplica por n/k_actual
+
     total_done = start_idx + len(processed_sources)
     norm = (n - 1) * (n - 2)
     scale = (n / total_done) if total_done > 0 else 1.0  # correção amostral
@@ -311,9 +271,6 @@ def run_betweenness_sampled(
     }
 
 
-# ══════════════════════════════════════════════════════════════
-# VISUALIZAÇÃO
-# ══════════════════════════════════════════════════════════════
 
 def plot_betweenness(result: dict, save_path: str = None):
 

@@ -354,14 +354,21 @@ def run_granovetter(
                 continue
 
             predecessors = list(G.predecessors(node))
+
             if not predecessors:
+                continue
+
+            infected_preds = [u for u in predecessors if adopted[u]]
+            
+            if not infected_preds:
                 continue
 
             toxic_signals = [
                 wr.toxic_signal(G[u][node].get("weight", wr.cutoff))
-                for u in predecessors if adopted[u]
+                for u in infected_preds
             ]
-            pressure_ratio = sum(toxic_signals) / len(predecessors)
+
+            pressure_ratio = sum(toxic_signals) / len(infected_preds)
 
             if pressure_ratio >= thresholds[node]:
                 new_adopted[node] = True
